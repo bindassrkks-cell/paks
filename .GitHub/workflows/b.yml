@@ -1,0 +1,151 @@
+name: PAK Repack + Lua Toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      pak_file:
+        description: 'Name of the .pak file (relative to repo root)'
+        required: true
+        default: 'game_patch_4.5.0.2.pak'
+      decompile_lua:
+        description: 'Decompile .lua files? (yes/no)'
+        required: false
+        default: 'yes'
+      recompile_lua:
+        description: 'Recompile .lua after editing? (yes/no)'
+        required: false
+        default: 'yes'
+      hex_patch:
+        description: 'Apply hex patches? (yes/no)'
+        required: false
+        default: 'no'
+
+jobs:
+  repack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y lua5.3 xxd default-jre wget python3-pip
+
+      - name: Download unluac
+        run: wget https://github.com/tst2005/lua-unluac/raw/master/unluac.jar -O /tmp/unluac.jar
+
+      - name: Prepare workspace
+        run: |
+          mkdir -p workspace/{PAK_ORIGINAL,PAK_UNPACK,LUA_ORIGINAL,LUA_UNPACK,EDITTED,REPACKED}
+
+      - name: Copy PAK
+        run: |
+          cp "${{ github.workspace }}/${{ github.event.inputs.pak_file }}" workspace/PAK_ORIGINAL/
+
+      - name: Unpack PAK using index.txt
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+          PAK_PATH = "workspace/PAK_ORIGINAL/" + os.path.basename("${{ github.event.inputs.pak_file }}")
+          INDEX = "assets/index.txt"
+          OUT = "workspace/PAK_UNPACK"
+          if not os.path.exists(INDEX):
+              import zipfile
+              with zipfile.ZipFile(PAK_PATH, 'r') as zf:
+                  zf.extractall(OUT)
+              sys.exit(0)
+          entries = []
+          with open(INDEX, 'r') as f:
+              for line in f:
+                  line = line.strip()
+                  if not line or line.startswith('#'): continue
+                  parts = [p.strip() for p in line.split(',')]
+                  if len(parts) != 3: continue
+                  entries.append({'path': parts[0], 'offset': int(parts[1]), 'size': int(parts[2])})
+          with open(PAK_PATH, 'rb') as pak:
+              for e in entries:
+                  pak.seek(e['offset'])
+                  data = pak.read(e['size'])
+                  out_file = os.path.join(OUT, e['path'])
+                  os.makedirs(os.path.dirname(out_file), exist_ok=True)
+                  with open(out_file, 'wb') as out: out.write(data)
+                  print(f"Unpacked {e['path']}")
+          EOF
+
+      - name: Decompile Lua
+        if: github.event.inputs.decompile_lua == 'yes'
+        run: |
+          find workspace/PAK_UNPACK -name "*.lua" -exec cp {} workspace/LUA_ORIGINAL/ \;
+          for lua in workspace/LUA_ORIGINAL/*.lua; do
+            [ -f "$lua" ] && java -jar /tmp/unluac.jar "$lua" > "workspace/LUA_UNPACK/$(basename "$lua" .lua).decompiled.lua"
+          done
+
+      - name: Recompile Lua
+        if: github.event.inputs.recompile_lua == 'yes'
+        run: |
+          mkdir -p workspace/EDITTED/LUA
+          cp workspace/LUA_UNPACK/*.decompiled.lua workspace/EDITTED/LUA/ 2>/dev/null || true
+          for src in workspace/EDITTED/LUA/*.decompiled.lua; do
+            [ -f "$src" ] && luac -o "workspace/EDITTED/$(basename "$src" .decompiled.lua).lua" "$src"
+          done
+
+      - name: Hex patch (optional)
+        if: github.event.inputs.hex_patch == 'yes'
+        run: |
+          for file in workspace/EDITTED/*.bin; do
+            [ -f "$file" ] && xxd "$file" | sed 's/^00000010: 00 00 00 00/00000010: 12 34 56 78/' | xxd -r > "$file.patched" && mv "$file.patched" "$file"
+          done
+
+      - name: Auto-fix header size
+        run: |
+          python3 - <<'EOF'
+          import os, struct
+          header = "workspace/EDITTED/header.bin"
+          if os.path.exists(header):
+              with open(header, 'r+b') as f:
+                  f.seek(0x10)
+                  f.write(struct.pack('<I', 123456789))  # replace with actual size computation
+          EOF
+
+      - name: Repack PAK
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+          INDEX = "assets/index.txt"
+          OUT = "workspace/REPACKED/repacked.pak"
+          if not os.path.exists(INDEX):
+              import zipfile
+              with zipfile.ZipFile(OUT, 'w', zipfile.ZIP_DEFLATED) as zf:
+                  for root, _, files in os.walk("workspace/EDITTED"):
+                      for f in files:
+                          zf.write(os.path.join(root, f), os.path.relpath(os.path.join(root, f), "workspace/EDITTED"))
+              sys.exit(0)
+          entries = []
+          with open(INDEX, 'r') as f:
+              for line in f:
+                  line = line.strip()
+                  if not line or line.startswith('#'): continue
+                  parts = [p.strip() for p in line.split(',')]
+                  if len(parts) != 3: continue
+                  entries.append({'path': parts[0], 'offset': int(parts[1]), 'size': int(parts[2])})
+          with open(OUT, 'wb') as pak:
+              for e in entries:
+                  src = os.path.join("workspace/EDITTED", e['path'])
+                  if not os.path.exists(src): src = os.path.join("workspace/PAK_UNPACK", e['path'])
+                  if not os.path.exists(src):
+                      data = b'\x00' * e['size']
+                  else:
+                      with open(src, 'rb') as f:
+                          data = f.read()
+                      if len(data) < e['size']: data += b'\x00' * (e['size'] - len(data))
+                      elif len(data) > e['size']: data = data[:e['size']]
+                  pak.seek(e['offset'])
+                  pak.write(data)
+          EOF
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repacked-pak
+          path: workspace/REPACKED/repacked.pak
