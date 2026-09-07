@@ -1,0 +1,28 @@
+{
+  "aimbot": true,
+  "magic_bt": 9.0,
+  "antena": false,
+  "headshot": true,
+  "headshot_multiplier": 3.5,
+  "ipad_view": false,
+  "aura_esp": false,
+  "bullet_spread": 5.0,
+  "scope_preset": "MEDIUM",
+  "no_recoil": {
+    "AUG": true,
+    "M416": true,
+    "DP28": true,
+    "SCAR": true,
+    "M249": false,
+    "UMP9": true,
+    "MG3": false,
+    "MK14": true
+  },
+  "car_speed": {
+    "BRDM": true,
+    "BUGGY": true,
+    "DACIA": true,
+    "UAZ": true,
+    "multiplier": 1.8
+  }
+}
